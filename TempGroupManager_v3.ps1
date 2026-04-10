@@ -14,7 +14,11 @@
             -Scope ForestOrConfigurationSet `
             -Target 'yourdomain.com'
 .NOTES
-    EventLog: Application / Source "TempGroupManager"
+    Autor       : Martin Lee Starke
+    Version     : 1.0
+    Aktualisiert: 10.04.2024
+
+    Audit-Log   : TempGroupManager_audit.csv (im Script-Verzeichnis)
         1001 - Mitgliedschaft hinzugefuegt
         1099 - Fehler
 #>
