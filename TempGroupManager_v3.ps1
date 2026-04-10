@@ -124,7 +124,7 @@ function Get-TempMemberships {
         if (-not $group.member) { continue }
         $ttlMembers = @($group.member | Where-Object { $_ -match '^<TTL=' })
         foreach ($m in $ttlMembers) {
-            if ($m -notmatch '^<TTL=(\d+),(.+)>$') { continue }
+            if ($m -notmatch '^<TTL=(\d+)>,(.+)$') { continue }
             $ttlSec   = [int]$Matches[1]
             $memberDN = $Matches[2]
             try {
