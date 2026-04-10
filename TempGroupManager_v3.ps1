@@ -46,6 +46,23 @@ try {
 }
 #endregion
 
+#region --- Datenmodell ---
+
+# Echte CLR-Properties notwendig, damit WPF-DataGrid-Binding funktioniert.
+# PSCustomObject-NoteProperties sind fuer WPFs Reflection-basiertes Binding unsichtbar.
+class TempMember {
+    [string]$Benutzer
+    [string]$Konto
+    [string]$Gruppe
+    [string]$Ablauf
+    [string]$Verbleibend
+    [string]$_UserDN
+    [string]$_GroupDN
+    [int]   $_TTLSec
+}
+
+#endregion
+
 #region --- Hilfsfunktionen ---
 
 function Test-ADPAMAvailable {
@@ -98,7 +115,7 @@ function Resolve-ADUser {
 }
 
 function Get-TempMemberships {
-    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $results = [System.Collections.Generic.List[TempMember]]::new()
     # -ShowMemberTimeToLive liefert TTL-Eintraege im Format <TTL=Sekunden,DN>
     # Nur Global-Gruppen abfragen — PAM nutzt ausschliesslich Global-Scope.
     # Das reduziert die LDAP-Treffermenge erheblich gegenueber -Filter *.
@@ -119,16 +136,16 @@ function Get-TempMemberships {
                 } else {
                     '{0}min' -f [math]::Floor($ttlSec / 60)
                 }
-                $results.Add([PSCustomObject]@{
-                    Benutzer   = $dispName
-                    Konto      = $user.SamAccountName
-                    Gruppe     = $group.Name
-                    Ablauf     = $expiry.ToString('dd.MM.yyyy HH:mm')
-                    Verbleibend = $remaining
-                    _UserDN    = $memberDN
-                    _GroupDN   = $group.DistinguishedName
-                    _TTLSec    = $ttlSec
-                })
+                $entry = [TempMember]::new()
+                $entry.Benutzer    = $dispName
+                $entry.Konto       = $user.SamAccountName
+                $entry.Gruppe      = $group.Name
+                $entry.Ablauf      = $expiry.ToString('dd.MM.yyyy HH:mm')
+                $entry.Verbleibend = $remaining
+                $entry._UserDN     = $memberDN
+                $entry._GroupDN    = $group.DistinguishedName
+                $entry._TTLSec     = $ttlSec
+                $results.Add($entry)
             } catch { }
         }
     }
