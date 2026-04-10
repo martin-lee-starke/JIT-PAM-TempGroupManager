@@ -61,6 +61,14 @@ function Get-StringValue {
     return $Value.ToString()
 }
 
+function Get-SafeSearchTerm {
+    # Entfernt Zeichen, die den PowerShell-AD-Filter-Parser brechen koennen.
+    # Hauptrisiko: einfache Anführungszeichen schliessen String-Literale im Filter
+    # und ermöglichen Filter-Injection (z.B. "a' -or '1'='1").
+    param([string]$Term)
+    return ($Term -replace "['\(\)\\\/\x00]", '').Trim()
+}
+
 function Resolve-ADGroup {
     param([string]$Identity)
     if ([string]::IsNullOrWhiteSpace($Identity)) { return $null }
@@ -89,19 +97,25 @@ function Add-TempMembership {
     param([string]$UserDN, [string]$GroupDN, [int]$Hours)
     Add-ADGroupMember -Identity $GroupDN -Members $UserDN `
         -MemberTimeToLive (New-TimeSpan -Hours $Hours)
+    $operator = "$env:USERDOMAIN\$env:USERNAME auf $env:COMPUTERNAME"
     Write-AuditLog -EventId 1001 `
-        -Message "Temporaere Mitgliedschaft hinzugefuegt: $UserDN -> $GroupDN ($Hours Stunden)"
+        -Message "Temporaere Mitgliedschaft hinzugefuegt: $UserDN -> $GroupDN ($Hours Stunden) | Operator: $operator"
 }
 
 function Write-AuditLog {
     param([int]$EventId, [string]$Message)
+    $entryType = if ($EventId -eq 1099) { 'Error' } else { 'Information' }
     try {
         if (-not [System.Diagnostics.EventLog]::SourceExists('TempGroupManager')) {
-            New-EventLog -LogName Application -Source 'TempGroupManager'
+            New-EventLog -LogName Application -Source 'TempGroupManager' -ErrorAction Stop
         }
         Write-EventLog -LogName Application -Source 'TempGroupManager' `
-            -EventId $EventId -EntryType Information -Message $Message
-    } catch { }
+            -EventId $EventId -EntryType $entryType -Message $Message -ErrorAction Stop
+    } catch {
+        # Audit-Logging fehlgeschlagen — Warnung ausgeben statt still scheitern
+        $script:AuditLogFailed = $true
+        $script:AuditLogError  = $_.Exception.Message
+    }
 }
 
 #endregion
@@ -133,8 +147,8 @@ function Show-SearchDialog {
         [System.Windows.Window]$Owner
     )
 
-    $title   = if ($Type -eq 'User') { 'Benutzer suchen' } else { 'Gruppe suchen' }
-    $header  = if ($Type -eq 'User') { 'Benutzer auswaehlen' } else { 'Gruppe auswaehlen' }
+    $title  = if ($Type -eq 'User') { 'Benutzer suchen' } else { 'Gruppe suchen' }
+    $header = if ($Type -eq 'User') { 'Benutzer auswaehlen' } else { 'Gruppe auswaehlen' }
 
     $dlgXaml = @"
 <Window
@@ -142,25 +156,22 @@ function Show-SearchDialog {
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="$title"
     Width="600" MinWidth="420"
-    Height="460" MinHeight="300"
+    Height="480" MinHeight="320"
     WindowStartupLocation="CenterOwner"
     ShowInTaskbar="False"
     FontFamily="Segoe UI" FontSize="13">
 
     <Window.Resources>
-        <SolidColorBrush x:Key="AccentBrush"  Color="#0078D4"/>
-        <SolidColorBrush x:Key="AccentDkBrush" Color="#005A9E"/>
         <Style TargetType="Button" x:Key="AccentBtn">
-            <Setter Property="Background"   Value="#0078D4"/>
-            <Setter Property="Foreground"   Value="White"/>
+            <Setter Property="Background"      Value="#0078D4"/>
+            <Setter Property="Foreground"      Value="White"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding"      Value="14,5"/>
-            <Setter Property="Cursor"       Value="Hand"/>
+            <Setter Property="Padding"         Value="14,5"/>
+            <Setter Property="Cursor"          Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}"
-                                CornerRadius="3"
+                        <Border Background="{TemplateBinding Background}" CornerRadius="3"
                                 Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
@@ -177,20 +188,19 @@ function Show-SearchDialog {
             </Setter>
         </Style>
         <Style TargetType="Button" x:Key="NeutralBtn">
-            <Setter Property="Background"   Value="#F0F0F0"/>
-            <Setter Property="Foreground"   Value="#222222"/>
-            <Setter Property="BorderBrush"  Value="#BDBDBD"/>
+            <Setter Property="Background"      Value="#F0F0F0"/>
+            <Setter Property="Foreground"      Value="#222222"/>
+            <Setter Property="BorderBrush"     Value="#BDBDBD"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding"      Value="14,5"/>
-            <Setter Property="Cursor"       Value="Hand"/>
+            <Setter Property="Padding"         Value="14,5"/>
+            <Setter Property="Cursor"          Value="Hand"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="3"
-                                Padding="{TemplateBinding Padding}">
+                                CornerRadius="3" Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -214,29 +224,34 @@ function Show-SearchDialog {
         <Border DockPanel.Dock="Bottom" Background="#F5F5F5"
                 BorderBrush="#E0E0E0" BorderThickness="0,1,0,0" Padding="12,8">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button x:Name="BtnOK"     Content="OK"         Style="{StaticResource AccentBtn}"
-                        IsEnabled="False"  Margin="0,0,8,0" MinWidth="80"/>
-                <Button x:Name="BtnCancel" Content="Abbrechen"  Style="{StaticResource NeutralBtn}"
+                <Button x:Name="BtnOK"     Content="OK"        Style="{StaticResource AccentBtn}"
+                        IsEnabled="False"  Margin="0,0,8,0"    MinWidth="80"/>
+                <Button x:Name="BtnCancel" Content="Abbrechen" Style="{StaticResource NeutralBtn}"
                         MinWidth="80"/>
             </StackPanel>
         </Border>
 
         <!-- Suchzeile -->
-        <Grid DockPanel.Dock="Top" Margin="12,10,12,6">
+        <Grid DockPanel.Dock="Top" Margin="12,10,12,4">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBox x:Name="TxtSearch" Grid.Column="0" Margin="0,0,8,0"
+                     MaxLength="256"
                      Padding="5,4" VerticalContentAlignment="Center"
-                     BorderBrush="#BDBDBD" BorderThickness="1"
-                     Tag="Name oder Konto eingeben..."/>
+                     BorderBrush="#BDBDBD" BorderThickness="1"/>
             <Button  x:Name="BtnSearch" Grid.Column="1" Content="Suchen"
                      Style="{StaticResource NeutralBtn}"/>
         </Grid>
 
+        <!-- Status-Zeile (Treffer, Fehler, Ladehinweis) -->
+        <TextBlock x:Name="LblStatus" DockPanel.Dock="Top"
+                   Margin="12,0,12,4" FontSize="11" Foreground="#767676"
+                   Text="Mindestens 2 Zeichen eingeben und Suchen druecken."/>
+
         <!-- Ergebnisliste -->
-        <DataGrid x:Name="DgResults" Margin="12,0,12,0"
+        <DataGrid x:Name="DgResults" Margin="12,0,12,8"
                   AutoGenerateColumns="False"
                   IsReadOnly="True"
                   SelectionMode="Single"
@@ -263,85 +278,149 @@ function Show-SearchDialog {
     # DataGrid-Spalten je nach Typ
     if ($Type -eq 'User') {
         $cols = @(
-            @{ Header = 'Anzeigename';   Binding = 'DisplayName';   Width = '*' },
+            @{ Header = 'Anzeigename';   Binding = 'DisplayName';    Width = '*'   },
             @{ Header = 'Benutzerkonto'; Binding = 'SamAccountName'; Width = '130' },
-            @{ Header = 'Abteilung';     Binding = 'Department';    Width = '130' }
+            @{ Header = 'Abteilung';     Binding = 'Department';     Width = '130' }
         )
     } else {
         $cols = @(
-            @{ Header = 'Name';          Binding = 'Name';          Width = '*' },
-            @{ Header = 'Typ';           Binding = 'GroupCategory'; Width = '100' },
-            @{ Header = 'Bereich';       Binding = 'GroupScope';    Width = '100' },
-            @{ Header = 'Beschreibung';  Binding = 'Description';   Width = '160' }
+            @{ Header = 'Name';         Binding = 'Name';          Width = '*'   },
+            @{ Header = 'Typ';          Binding = 'GroupCategory'; Width = '100' },
+            @{ Header = 'Bereich';      Binding = 'GroupScope';    Width = '100' },
+            @{ Header = 'Beschreibung'; Binding = 'Description';   Width = '160' }
         )
     }
 
-    $dg = $dlg.FindName('DgResults')
-    foreach ($c in $cols) {
-        $col           = New-Object System.Windows.Controls.DataGridTextColumn
-        $col.Header    = $c.Header
-        $col.Binding   = New-Object System.Windows.Data.Binding($c.Binding)
-        if ($c.Width -eq '*') {
-            $col.Width = [System.Windows.Controls.DataGridLength]::new(1, [System.Windows.Controls.DataGridLengthUnitType]::Star)
-        } else {
-            $col.Width = [System.Windows.Controls.DataGridLength]::new([double]$c.Width)
-        }
-        $dg.Columns.Add($col)
-    }
-
+    $dg        = $dlg.FindName('DgResults')
     $txtSearch = $dlg.FindName('TxtSearch')
     $btnSearch = $dlg.FindName('BtnSearch')
     $btnOK     = $dlg.FindName('BtnOK')
     $btnCancel = $dlg.FindName('BtnCancel')
+    $lblStatus = $dlg.FindName('LblStatus')
+
+    foreach ($c in $cols) {
+        $col        = New-Object System.Windows.Controls.DataGridTextColumn
+        $col.Header = $c.Header
+        $col.Binding = New-Object System.Windows.Data.Binding($c.Binding)
+        $col.Width   = if ($c.Width -eq '*') {
+            [System.Windows.Controls.DataGridLength]::new(
+                1, [System.Windows.Controls.DataGridLengthUnitType]::Star)
+        } else {
+            [System.Windows.Controls.DataGridLength]::new([double]$c.Width)
+        }
+        $dg.Columns.Add($col)
+    }
 
     $script:DlgResult = $null
 
+    # Async-Suche: AD-Abfrage in Runspace, UI-Update via DispatcherTimer
     $doSearch = {
         $term = $txtSearch.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($term)) { return }
-        $dlg.Cursor = [System.Windows.Input.Cursors]::Wait
-        $dg.ItemsSource = $null
-        try {
-            if ($Type -eq 'User') {
-                $items = @(
-                    Get-ADUser `
-                        -Filter "Name -like '*$term*' -or SamAccountName -like '*$term*'" `
-                        -Properties DisplayName, SamAccountName, Department, Enabled `
-                        -ResultSetSize 100 |
-                    Where-Object { $_.Enabled } |
-                    Sort-Object DisplayName |
-                    ForEach-Object {
-                        [PSCustomObject]@{
-                            DisplayName    = if ($_.DisplayName) { $_.DisplayName } else { $_.SamAccountName }
-                            SamAccountName = $_.SamAccountName
-                            Department     = Get-StringValue $_.Department
-                            _ADObject      = $_
-                        }
-                    }
-                )
-            } else {
-                $items = @(
-                    Get-ADGroup `
-                        -Filter "Name -like '*$term*'" `
-                        -Properties Name, GroupCategory, GroupScope, Description `
-                        -ResultSetSize 200 |
-                    Sort-Object Name |
-                    ForEach-Object {
-                        [PSCustomObject]@{
-                            Name          = $_.Name
-                            GroupCategory = $_.GroupCategory.ToString()
-                            GroupScope    = $_.GroupScope.ToString()
-                            Description   = Get-StringValue $_.Description
-                            _ADObject     = $_
-                        }
-                    }
-                )
-            }
-            $dg.ItemsSource = $items
-            $btnOK.IsEnabled = $false
-        } finally {
-            $dlg.Cursor = $null
+
+        # Mindestlaenge pruefen (verhindert unkontrollierte Massenabfragen)
+        if ($term.Length -lt 2) {
+            $lblStatus.Text       = 'Mindestens 2 Zeichen eingeben.'
+            $lblStatus.Foreground = '#C75000'
+            return
         }
+
+        # Eingabe bereinigen (Filter-Injection-Schutz)
+        $safeTerm = Get-SafeSearchTerm -Term $term
+        if ([string]::IsNullOrWhiteSpace($safeTerm)) {
+            $lblStatus.Text       = 'Suchbegriff enthaelt nur unzulaessige Zeichen.'
+            $lblStatus.Foreground = '#C75000'
+            return
+        }
+
+        # UI fuer Suche sperren (kein paralleler zweiter Request moeglich)
+        $btnSearch.IsEnabled = $false
+        $btnOK.IsEnabled     = $false
+        $dg.ItemsSource      = $null
+        $lblStatus.Text       = 'Suche laeuft...'
+        $lblStatus.Foreground = '#767676'
+
+        # Runspace erstellen — AD-Abfrage laeuft im Hintergrund
+        $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.ApartmentState = 'MTA'
+        $rs.ThreadOptions  = 'ReuseThread'
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('SearchTerm', $safeTerm)
+        $rs.SessionStateProxy.SetVariable('SearchType', $Type)
+
+        $ps = [System.Management.Automation.PowerShell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript({
+            Import-Module ActiveDirectory -ErrorAction Stop
+            if ($SearchType -eq 'User') {
+                @(Get-ADUser `
+                    -Filter "Name -like '*$SearchTerm*' -or SamAccountName -like '*$SearchTerm*'" `
+                    -Properties DisplayName, SamAccountName, Department, Enabled `
+                    -ResultSetSize 100 |
+                Where-Object { $_.Enabled } |
+                Sort-Object DisplayName |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        DisplayName    = if ($_.DisplayName) { $_.DisplayName } else { $_.SamAccountName }
+                        SamAccountName = $_.SamAccountName
+                        Department     = if ($_.Department)  { $_.Department  } else { '' }
+                        _ADObject      = $_
+                    }
+                })
+            } else {
+                @(Get-ADGroup `
+                    -Filter "Name -like '*$SearchTerm*'" `
+                    -Properties Name, GroupCategory, GroupScope, Description `
+                    -ResultSetSize 200 |
+                Sort-Object Name |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Name          = $_.Name
+                        GroupCategory = $_.GroupCategory.ToString()
+                        GroupScope    = $_.GroupScope.ToString()
+                        Description   = if ($_.Description) { $_.Description } else { '' }
+                        _ADObject     = $_
+                    }
+                })
+            }
+        })
+
+        $asyncResult = $ps.BeginInvoke()
+
+        # DispatcherTimer laeuft auf dem UI-Thread — prueft alle 200 ms ob Runspace fertig ist
+        $timer          = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(200)
+
+        $tickHandler = {
+            if (-not $asyncResult.IsCompleted) { return }
+            $timer.Stop()
+            try {
+                $results = @($ps.EndInvoke($asyncResult))
+                if ($ps.HadErrors) {
+                    $errText              = $ps.Streams.Error[0].ToString()
+                    $lblStatus.Text       = "AD-Fehler: $errText"
+                    $lblStatus.Foreground = '#A4262C'
+                } else {
+                    $dg.ItemsSource       = $results
+                    $count                = $results.Count
+                    $lblStatus.Text       = if ($count -eq 0) {
+                        'Keine Ergebnisse gefunden.'
+                    } else {
+                        "$count Ergebnis(se) — Doppelklick oder OK zum Auswaehlen."
+                    }
+                    $lblStatus.Foreground = '#107C10'
+                }
+            } catch {
+                $lblStatus.Text       = "Unerwarteter Fehler: $_"
+                $lblStatus.Foreground = '#A4262C'
+            } finally {
+                try { $ps.Dispose() }  catch { }
+                try { $rs.Close(); $rs.Dispose() } catch { }
+                $btnSearch.IsEnabled = $true
+            }
+        }.GetNewClosure()
+
+        $timer.Add_Tick($tickHandler)
+        $timer.Start()
     }
 
     $btnSearch.Add_Click($doSearch)
@@ -507,7 +586,7 @@ $mainXaml = @'
                         <!-- Card-Header -->
                         <Border Grid.Row="0" Background="{StaticResource AccentBrush}"
                                 CornerRadius="4,4,0,0" Padding="12,7">
-                            <TextBlock Text="1   BENUTZER"
+                            <TextBlock Text="1.   BENUTZER"
                                        Foreground="White" FontWeight="SemiBold"/>
                         </Border>
 
@@ -525,7 +604,7 @@ $mainXaml = @'
                                     <ColumnDefinition Width="8"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBox x:Name="TxtUser"   Grid.Column="0"/>
+                                <TextBox x:Name="TxtUser"   Grid.Column="0" MaxLength="256"/>
                                 <Button  x:Name="BtnUserSearch" Grid.Column="2"
                                          Content="Suchen..."
                                          Style="{StaticResource NeutralBtn}"/>
@@ -555,7 +634,7 @@ $mainXaml = @'
 
                         <Border Grid.Row="0" Background="{StaticResource AccentBrush}"
                                 CornerRadius="4,4,0,0" Padding="12,7">
-                            <TextBlock Text="2   GRUPPE"
+                            <TextBlock Text="2.   GRUPPE"
                                        Foreground="White" FontWeight="SemiBold"/>
                         </Border>
 
@@ -571,7 +650,7 @@ $mainXaml = @'
                                     <ColumnDefinition Width="8"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBox x:Name="TxtGroup"      Grid.Column="0"/>
+                                <TextBox x:Name="TxtGroup"      Grid.Column="0" MaxLength="256"/>
                                 <Button  x:Name="BtnGroupSearch" Grid.Column="2"
                                          Content="Suchen..."
                                          Style="{StaticResource NeutralBtn}"/>
@@ -600,7 +679,7 @@ $mainXaml = @'
 
                         <Border Grid.Row="0" Background="{StaticResource AccentBrush}"
                                 CornerRadius="4,4,0,0" Padding="12,7">
-                            <TextBlock Text="3   FREIGABE"
+                            <TextBlock Text="3.   FREIGABE"
                                        Foreground="White" FontWeight="SemiBold"/>
                         </Border>
 
@@ -610,7 +689,7 @@ $mainXaml = @'
                                        VerticalAlignment="Center"/>
                             <TextBox x:Name="TxtDauer"
                                      Width="70" Margin="0,0,8,0"
-                                     Text="8"
+                                     Text="8" MaxLength="4"
                                      HorizontalContentAlignment="Center"/>
                             <ComboBox x:Name="CmbUnit" Width="100" Margin="0,0,16,0"
                                       SelectedIndex="0">
@@ -618,7 +697,7 @@ $mainXaml = @'
                                 <ComboBoxItem Content="Tage"/>
                             </ComboBox>
                             <Button x:Name="BtnAdd"
-                                    Content="Mitgliedschaft hinzufuegen"
+                                    Content="Mitgliedschaft hinzufügen"
                                     Style="{StaticResource AccentBtn}"/>
                         </WrapPanel>
                     </Grid>
@@ -653,8 +732,10 @@ $cmbUnit        = $window.FindName('CmbUnit')
 $btnAdd         = $window.FindName('BtnAdd')
 
 # Zustand
-$script:SelectedUser  = $null
-$script:SelectedGroup = $null
+$script:SelectedUser   = $null
+$script:SelectedGroup  = $null
+$script:AuditLogFailed = $false
+$script:AuditLogError  = ''
 
 # --- Hilfsfunktionen fuer Status-TextBlock ---
 
@@ -817,6 +898,20 @@ $btnAdd.Add_Click({
     }
 
     $hours  = if ($cmbUnit.SelectedIndex -eq 1) { $dauerVal * 24 } else { $dauerVal }
+
+    # Maximale TTL: 1 Jahr (8760 Stunden) — Sicherheitsgrenze fuer PAM
+    $maxHours = 8760
+    if ($hours -gt $maxHours) {
+        [System.Windows.MessageBox]::Show(
+            $window,
+            "Die maximale Dauer betraegt 1 Jahr (8760 Stunden).`nEingegebener Wert: $hours Stunden.",
+            "Dauer zu gross",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Warning
+        ) | Out-Null
+        return
+    }
+
     $expiry = (Get-Date).AddHours($hours).ToString('dd.MM.yyyy HH:mm')
     $uName  = if ($script:SelectedUser.DisplayName) {
         $script:SelectedUser.DisplayName
@@ -841,13 +936,25 @@ $btnAdd.Add_Click({
             -GroupDN $script:SelectedGroup.DistinguishedName `
             -Hours   $hours
 
-        [System.Windows.MessageBox]::Show(
-            $window,
-            "Mitgliedschaft erfolgreich hinzugefuegt.`nAblauf: $expiry",
-            "Erfolg",
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Information
-        ) | Out-Null
+        # Auf fehlgeschlagenes Audit-Logging pruefen
+        if ($script:AuditLogFailed) {
+            $script:AuditLogFailed = $false
+            [System.Windows.MessageBox]::Show(
+                $window,
+                "Mitgliedschaft wurde hinzugefuegt, aber der Audit-Log-Eintrag konnte nicht geschrieben werden.`n`nFehler: $script:AuditLogError`n`nAblauf: $expiry`n`nBitte EventLog-Berechtigungen pruefen (Quelle 'TempGroupManager' muss vorhanden sein).",
+                "Warnung: Audit-Logging fehlgeschlagen",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Warning
+            ) | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show(
+                $window,
+                "Mitgliedschaft erfolgreich hinzugefuegt.`nAblauf: $expiry",
+                "Erfolg",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Information
+            ) | Out-Null
+        }
 
         # Reset
         $txtUser.Text  = ''
