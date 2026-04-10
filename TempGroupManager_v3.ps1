@@ -93,6 +93,44 @@ function Resolve-ADUser {
     }
 }
 
+function Get-TempMemberships {
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    # -ShowMemberTimeToLive liefert TTL-Eintraege im Format <TTL=Sekunden,DN>
+    # Nur Global-Gruppen abfragen — PAM nutzt ausschliesslich Global-Scope.
+    # Das reduziert die LDAP-Treffermenge erheblich gegenueber -Filter *.
+    $groups = @(Get-ADGroup -Filter "GroupScope -eq 'Global'" -Properties member -ShowMemberTimeToLive -ResultSetSize 2000)
+    foreach ($group in $groups) {
+        if (-not $group.member) { continue }
+        $ttlMembers = @($group.member | Where-Object { $_ -match '^<TTL=' })
+        foreach ($m in $ttlMembers) {
+            if ($m -notmatch '^<TTL=(\d+),(.+)>$') { continue }
+            $ttlSec   = [int]$Matches[1]
+            $memberDN = $Matches[2]
+            try {
+                $user     = Get-ADUser -Identity $memberDN -Properties DisplayName -ErrorAction Stop
+                $dispName = if ($user.DisplayName) { $user.DisplayName } else { $user.SamAccountName }
+                $expiry   = (Get-Date).AddSeconds($ttlSec)
+                $remaining = if ($ttlSec -ge 3600) {
+                    '{0}h {1}min' -f [math]::Floor($ttlSec / 3600), [math]::Floor(($ttlSec % 3600) / 60)
+                } else {
+                    '{0}min' -f [math]::Floor($ttlSec / 60)
+                }
+                $results.Add([PSCustomObject]@{
+                    Benutzer   = $dispName
+                    Konto      = $user.SamAccountName
+                    Gruppe     = $group.Name
+                    Ablauf     = $expiry.ToString('dd.MM.yyyy HH:mm')
+                    Verbleibend = $remaining
+                    _UserDN    = $memberDN
+                    _GroupDN   = $group.DistinguishedName
+                    _TTLSec    = $ttlSec
+                })
+            } catch { }
+        }
+    }
+    return $results | Sort-Object _TTLSec
+}
+
 function Add-TempMembership {
     param([string]$UserDN, [string]$GroupDN, [int]$Hours)
     Add-ADGroupMember -Identity $GroupDN -Members $UserDN `
@@ -116,6 +154,164 @@ function Write-AuditLog {
         $script:AuditLogFailed = $true
         $script:AuditLogError  = $_.Exception.Message
     }
+}
+
+function Show-ActiveMemberships {
+    param([System.Windows.Window]$Owner)
+
+    $xaml = @'
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Aktive temporaere Mitgliedschaften"
+    Width="780" MinWidth="520"
+    Height="480" MinHeight="300"
+    WindowStartupLocation="CenterOwner"
+    ShowInTaskbar="False"
+    FontFamily="Segoe UI" FontSize="13">
+
+    <Window.Resources>
+        <Style x:Key="AccentBtn" TargetType="Button">
+            <Setter Property="Background"      Value="#008444"/>
+            <Setter Property="Foreground"      Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding"         Value="14,6"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#005A9E"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Background" Value="#BDBDBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="NeutralBtn" TargetType="Button">
+            <Setter Property="Background"      Value="#EFEFEF"/>
+            <Setter Property="Foreground"      Value="#222222"/>
+            <Setter Property="BorderBrush"     Value="#BDBDBD"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding"         Value="14,6"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#E0E0E0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- Header -->
+        <Border DockPanel.Dock="Top" Background="#008444" Padding="14,10">
+            <TextBlock Text="Aktive temporaere Mitgliedschaften" Foreground="White"
+                       FontSize="14" FontWeight="SemiBold"/>
+        </Border>
+
+        <!-- Toolbar -->
+        <Border DockPanel.Dock="Top" Background="#F5F5F5"
+                BorderBrush="#E0E0E0" BorderThickness="0,0,0,1" Padding="12,7">
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnRefresh" Content="Aktualisieren"
+                        Style="{StaticResource AccentBtn}" Margin="0,0,12,0"/>
+                <TextBlock x:Name="LblStatus" VerticalAlignment="Center"
+                           Foreground="#767676" FontSize="11"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Button-Leiste unten -->
+        <Border DockPanel.Dock="Bottom" Background="#F5F5F5"
+                BorderBrush="#E0E0E0" BorderThickness="0,1,0,0" Padding="12,8">
+            <Button x:Name="BtnClose" Content="Schliessen"
+                    Style="{StaticResource NeutralBtn}"
+                    HorizontalAlignment="Right" MinWidth="80"/>
+        </Border>
+
+        <!-- Tabelle -->
+        <DataGrid x:Name="DgMemberships" Margin="12,8,12,0"
+                  AutoGenerateColumns="False"
+                  IsReadOnly="True"
+                  SelectionMode="Single"
+                  SelectionUnit="FullRow"
+                  GridLinesVisibility="Horizontal"
+                  HeadersVisibility="Column"
+                  BorderBrush="#E0E0E0" BorderThickness="1"
+                  RowBackground="White"
+                  AlternatingRowBackground="#F8F8F8"
+                  HorizontalScrollBarVisibility="Disabled"
+                  VerticalScrollBarVisibility="Auto"
+                  CanUserResizeRows="False"
+                  CanUserAddRows="False">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="Benutzer"    Binding="{Binding Benutzer}"    Width="*"/>
+                <DataGridTextColumn Header="Konto"       Binding="{Binding Konto}"       Width="130"/>
+                <DataGridTextColumn Header="Gruppe"      Binding="{Binding Gruppe}"      Width="*"/>
+                <DataGridTextColumn Header="Ablauf"      Binding="{Binding Ablauf}"      Width="120"/>
+                <DataGridTextColumn Header="Verbleibend" Binding="{Binding Verbleibend}" Width="90"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+    $dlg = [Windows.Markup.XamlReader]::Load($reader)
+    $dlg.Owner = $Owner
+
+    $dg         = $dlg.FindName('DgMemberships')
+    $btnRefresh = $dlg.FindName('BtnRefresh')
+    $btnClose   = $dlg.FindName('BtnClose')
+    $lblStatus  = $dlg.FindName('LblStatus')
+
+    $loadData = {
+        $lblStatus.Text    = 'Lade...'
+        $dlg.Cursor        = [System.Windows.Input.Cursors]::Wait
+        $dg.ItemsSource    = $null
+        try {
+            $items = Get-TempMemberships
+            $dg.ItemsSource = $items
+            $count = @($items).Count
+            $lblStatus.Text = if ($count -eq 0) {
+                'Keine aktiven Befristungen gefunden.'
+            } else {
+                "$count aktive Befristung(en)   |   Stand: $(Get-Date -Format 'HH:mm:ss')"
+            }
+        } catch {
+            $lblStatus.Text = "Fehler: $_"
+        } finally {
+            $dlg.Cursor = $null
+        }
+    }
+
+    $btnRefresh.Add_Click($loadData)
+    $btnClose.Add_Click({ $dlg.Close() })
+
+    # Beim Oeffnen sofort laden
+    $dlg.Add_Loaded($loadData)
+
+    $dlg.ShowDialog() | Out-Null
 }
 
 #endregion
@@ -513,7 +709,21 @@ $mainXaml = @'
     </Window.Resources>
 
     <DockPanel Background="{StaticResource AppBgBrush}">
-    
+
+        <!-- === HEADER === -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource AccentBrush}" Padding="16,10">
+            <Grid>
+                <TextBlock Text="EXA Temp Gruppenmitgliedschaft  [AD PAM]"
+                           Foreground="White" FontSize="15" FontWeight="SemiBold"
+                           VerticalAlignment="Center"/>
+                <Button x:Name="BtnShowActive"
+                        Content="Aktive Befristungen"
+                        HorizontalAlignment="Right"
+                        Style="{StaticResource NeutralBtn}"
+                        Padding="12,5" FontSize="12"/>
+            </Grid>
+        </Border>
+
         <!-- === INHALT (scrollbar fuer kleine Fenster) === -->
         <ScrollViewer VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
@@ -684,6 +894,7 @@ $txtGroupStatus = $window.FindName('TxtGroupStatus')
 $txtDauer       = $window.FindName('TxtDauer')
 $cmbUnit        = $window.FindName('CmbUnit')
 $btnAdd         = $window.FindName('BtnAdd')
+$btnShowActive  = $window.FindName('BtnShowActive')
 
 # Zustand
 $script:SelectedUser   = $null
@@ -806,6 +1017,12 @@ $btnGroupSearch.Add_Click({
         $txtGroup.Text = $result.Name
         Set-GroupStatus -Text ([string][char]0x2714 + "  $($result.Name)") -Color Success
     }
+})
+
+# --- Aktive Befristungen anzeigen ---
+
+$btnShowActive.Add_Click({
+    Show-ActiveMemberships -Owner $window
 })
 
 # --- Dauer-Eingabe: nur Zahlen erlauben ---
