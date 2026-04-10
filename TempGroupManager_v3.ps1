@@ -163,7 +163,7 @@ function Show-SearchDialog {
 
     <Window.Resources>
         <Style TargetType="Button" x:Key="AccentBtn">
-            <Setter Property="Background"      Value="#0078D4"/>
+            <Setter Property="Background"      Value="#008444"/>
             <Setter Property="Foreground"      Value="White"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding"         Value="14,5"/>
@@ -216,7 +216,7 @@ function Show-SearchDialog {
 
     <DockPanel>
         <!-- Header -->
-        <Border DockPanel.Dock="Top" Background="#0078D4" Padding="14,10">
+        <Border DockPanel.Dock="Top" Background="#008444" Padding="14,10">
             <TextBlock Text="$header" Foreground="White" FontSize="14" FontWeight="SemiBold"/>
         </Border>
 
@@ -432,7 +432,7 @@ $mainXaml = @'
     <Window.Resources>
 
         <!-- Brushes -->
-        <SolidColorBrush x:Key="AccentBrush"   Color="#0078D4"/>
+        <SolidColorBrush x:Key="AccentBrush"   Color="#008444"/>
         <SolidColorBrush x:Key="SuccessBrush"  Color="#107C10"/>
         <SolidColorBrush x:Key="ErrorBrush"    Color="#A4262C"/>
         <SolidColorBrush x:Key="MutedBrush"    Color="#767676"/>
@@ -442,7 +442,7 @@ $mainXaml = @'
 
         <!-- Accent-Button -->
         <Style x:Key="AccentBtn" TargetType="Button">
-            <Setter Property="Background"      Value="#0078D4"/>
+            <Setter Property="Background"      Value="#008444"/>
             <Setter Property="Foreground"      Value="White"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding"         Value="14,6"/>
