@@ -74,7 +74,7 @@ function Resolve-ADGroup {
     if ([string]::IsNullOrWhiteSpace($Identity)) { return $null }
     try {
         return Get-ADGroup -Identity $Identity `
-            -Properties Name, GroupCategory, GroupScope, Description `
+            -Properties Name, Description `
             -ErrorAction Stop
     } catch {
         return $null
@@ -284,10 +284,8 @@ function Show-SearchDialog {
         )
     } else {
         $cols = @(
-            @{ Header = 'Name';         Binding = 'Name';          Width = '*'   },
-            @{ Header = 'Typ';          Binding = 'GroupCategory'; Width = '100' },
-            @{ Header = 'Bereich';      Binding = 'GroupScope';    Width = '100' },
-            @{ Header = 'Beschreibung'; Binding = 'Description';   Width = '160' }
+            @{ Header = 'Name';         Binding = 'Name';        Width = '*'   },
+            @{ Header = 'Beschreibung'; Binding = 'Description'; Width = '220' }
         )
     }
 
@@ -356,17 +354,15 @@ function Show-SearchDialog {
             } else {
                 $items = @(
                     Get-ADGroup `
-                        -Filter "Name -like '*$safeTerm*'" `
-                        -Properties Name, GroupCategory, GroupScope, Description `
+                        -Filter "Name -like '*$safeTerm*' -and GroupScope -eq 'Global'" `
+                        -Properties Name, Description `
                         -ResultSetSize 200 |
                     Sort-Object Name |
                     ForEach-Object {
                         [PSCustomObject]@{
-                            Name          = $_.Name
-                            GroupCategory = $_.GroupCategory.ToString()
-                            GroupScope    = $_.GroupScope.ToString()
-                            Description   = if ($_.Description) { $_.Description } else { '' }
-                            _ADObject     = $_
+                            Name        = $_.Name
+                            Description = if ($_.Description) { $_.Description } else { '' }
+                            _ADObject   = $_
                         }
                     }
                 )
@@ -786,7 +782,7 @@ $resolveGroup = {
             Set-GroupStatus -Text ([string][char]0x2718 + "  Gruppe nicht gefunden") -Color Error
         } else {
             $script:SelectedGroup = $g
-            Set-GroupStatus -Text ([string][char]0x2714 + "  $($g.Name)  ($($g.GroupCategory) / $($g.GroupScope))") -Color Success
+            Set-GroupStatus -Text ([string][char]0x2714 + "  $($g.Name)") -Color Success
         }
     } finally {
         $window.Cursor = $null
@@ -808,7 +804,7 @@ $btnGroupSearch.Add_Click({
     if ($null -ne $result) {
         $script:SelectedGroup = $result
         $txtGroup.Text = $result.Name
-        Set-GroupStatus -Text ([string][char]0x2714 + "  $($result.Name)  ($($result.GroupCategory) / $($result.GroupScope))") -Color Success
+        Set-GroupStatus -Text ([string][char]0x2714 + "  $($result.Name)") -Color Success
     }
 })
 
