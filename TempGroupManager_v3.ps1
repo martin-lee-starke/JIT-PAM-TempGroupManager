@@ -313,18 +313,15 @@ function Show-SearchDialog {
 
     $script:DlgResult = $null
 
-    # Async-Suche: AD-Abfrage in Runspace, UI-Update via DispatcherTimer
     $doSearch = {
         $term = $txtSearch.Text.Trim()
 
-        # Mindestlaenge pruefen (verhindert unkontrollierte Massenabfragen)
         if ($term.Length -lt 2) {
             $lblStatus.Text       = 'Mindestens 2 Zeichen eingeben.'
             $lblStatus.Foreground = '#C75000'
             return
         }
 
-        # Eingabe bereinigen (Filter-Injection-Schutz)
         $safeTerm = Get-SafeSearchTerm -Term $term
         if ([string]::IsNullOrWhiteSpace($safeTerm)) {
             $lblStatus.Text       = 'Suchbegriff enthaelt nur unzulaessige Zeichen.'
@@ -332,95 +329,62 @@ function Show-SearchDialog {
             return
         }
 
-        # UI fuer Suche sperren (kein paralleler zweiter Request moeglich)
-        $btnSearch.IsEnabled = $false
-        $btnOK.IsEnabled     = $false
-        $dg.ItemsSource      = $null
+        $dlg.Cursor           = [System.Windows.Input.Cursors]::Wait
+        $dg.ItemsSource       = $null
+        $btnOK.IsEnabled      = $false
         $lblStatus.Text       = 'Suche laeuft...'
         $lblStatus.Foreground = '#767676'
 
-        # Runspace erstellen — AD-Abfrage laeuft im Hintergrund
-        $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $rs.ApartmentState = 'MTA'
-        $rs.ThreadOptions  = 'ReuseThread'
-        $rs.Open()
-        $rs.SessionStateProxy.SetVariable('SearchTerm', $safeTerm)
-        $rs.SessionStateProxy.SetVariable('SearchType', $Type)
-
-        $ps = [System.Management.Automation.PowerShell]::Create()
-        $ps.Runspace = $rs
-        [void]$ps.AddScript({
-            Import-Module ActiveDirectory -ErrorAction Stop
-            if ($SearchType -eq 'User') {
-                @(Get-ADUser `
-                    -Filter "Name -like '*$SearchTerm*' -or SamAccountName -like '*$SearchTerm*'" `
-                    -Properties DisplayName, SamAccountName, Department, Enabled `
-                    -ResultSetSize 100 |
-                Where-Object { $_.Enabled } |
-                Sort-Object DisplayName |
-                ForEach-Object {
-                    [PSCustomObject]@{
-                        DisplayName    = if ($_.DisplayName) { $_.DisplayName } else { $_.SamAccountName }
-                        SamAccountName = $_.SamAccountName
-                        Department     = if ($_.Department)  { $_.Department  } else { '' }
-                        _ADObject      = $_
+        try {
+            if ($Type -eq 'User') {
+                $items = @(
+                    Get-ADUser `
+                        -Filter "Name -like '*$safeTerm*' -or SamAccountName -like '*$safeTerm*'" `
+                        -Properties DisplayName, SamAccountName, Department, Enabled `
+                        -ResultSetSize 100 |
+                    Where-Object { $_.Enabled } |
+                    Sort-Object DisplayName |
+                    ForEach-Object {
+                        [PSCustomObject]@{
+                            DisplayName    = if ($_.DisplayName) { $_.DisplayName } else { $_.SamAccountName }
+                            SamAccountName = $_.SamAccountName
+                            Department     = if ($_.Department)  { $_.Department  } else { '' }
+                            _ADObject      = $_
+                        }
                     }
-                })
+                )
             } else {
-                @(Get-ADGroup `
-                    -Filter "Name -like '*$SearchTerm*'" `
-                    -Properties Name, GroupCategory, GroupScope, Description `
-                    -ResultSetSize 200 |
-                Sort-Object Name |
-                ForEach-Object {
-                    [PSCustomObject]@{
-                        Name          = $_.Name
-                        GroupCategory = $_.GroupCategory.ToString()
-                        GroupScope    = $_.GroupScope.ToString()
-                        Description   = if ($_.Description) { $_.Description } else { '' }
-                        _ADObject     = $_
+                $items = @(
+                    Get-ADGroup `
+                        -Filter "Name -like '*$safeTerm*'" `
+                        -Properties Name, GroupCategory, GroupScope, Description `
+                        -ResultSetSize 200 |
+                    Sort-Object Name |
+                    ForEach-Object {
+                        [PSCustomObject]@{
+                            Name          = $_.Name
+                            GroupCategory = $_.GroupCategory.ToString()
+                            GroupScope    = $_.GroupScope.ToString()
+                            Description   = if ($_.Description) { $_.Description } else { '' }
+                            _ADObject     = $_
+                        }
                     }
-                })
+                )
             }
-        })
-
-        $asyncResult = $ps.BeginInvoke()
-
-        # DispatcherTimer laeuft auf dem UI-Thread — prueft alle 200 ms ob Runspace fertig ist
-        $timer          = New-Object System.Windows.Threading.DispatcherTimer
-        $timer.Interval = [TimeSpan]::FromMilliseconds(200)
-
-        $tickHandler = {
-            if (-not $asyncResult.IsCompleted) { return }
-            $timer.Stop()
-            try {
-                $results = @($ps.EndInvoke($asyncResult))
-                if ($ps.HadErrors) {
-                    $errText              = $ps.Streams.Error[0].ToString()
-                    $lblStatus.Text       = "AD-Fehler: $errText"
-                    $lblStatus.Foreground = '#A4262C'
-                } else {
-                    $dg.ItemsSource       = $results
-                    $count                = $results.Count
-                    $lblStatus.Text       = if ($count -eq 0) {
-                        'Keine Ergebnisse gefunden.'
-                    } else {
-                        "$count Ergebnis(se) — Doppelklick oder OK zum Auswaehlen."
-                    }
-                    $lblStatus.Foreground = '#107C10'
-                }
-            } catch {
-                $lblStatus.Text       = "Unerwarteter Fehler: $_"
-                $lblStatus.Foreground = '#A4262C'
-            } finally {
-                try { $ps.Dispose() }  catch { }
-                try { $rs.Close(); $rs.Dispose() } catch { }
-                $btnSearch.IsEnabled = $true
+            $dg.ItemsSource       = $items
+            $count                = $items.Count
+            $lblStatus.Text       = if ($count -eq 0) {
+                'Keine Ergebnisse gefunden.'
+            } else {
+                "$count Ergebnis(se) — Doppelklick oder OK zum Auswaehlen."
             }
-        }.GetNewClosure()
-
-        $timer.Add_Tick($tickHandler)
-        $timer.Start()
+            $lblStatus.Foreground = if ($count -eq 0) { '#767676' } else { '#107C10' }
+        } catch {
+            $lblStatus.Text       = "AD-Fehler: $_"
+            $lblStatus.Foreground = '#A4262C'
+        } finally {
+            $dlg.Cursor = $null
+        }
     }
 
     $btnSearch.Add_Click($doSearch)
