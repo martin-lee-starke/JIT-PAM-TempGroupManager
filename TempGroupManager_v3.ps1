@@ -142,18 +142,17 @@ function Add-TempMembership {
 
 function Write-AuditLog {
     param([int]$EventId, [string]$Message)
-    $entryType = if ($EventId -eq 1099) { 'Error' } else { 'Information' }
     try {
-        if (-not [System.Diagnostics.EventLog]::SourceExists('TempGroupManager')) {
-            New-EventLog -LogName Application -Source 'TempGroupManager' -ErrorAction Stop
+        $logFile = Join-Path $PSScriptRoot 'TempGroupManager_audit.csv'
+        $line = [PSCustomObject]@{
+            Zeitstempel = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            EventId     = $EventId
+            Operator    = "$env:USERDOMAIN\$env:USERNAME"
+            Computer    = $env:COMPUTERNAME
+            Meldung     = $Message
         }
-        Write-EventLog -LogName Application -Source 'TempGroupManager' `
-            -EventId $EventId -EntryType $entryType -Message $Message -ErrorAction Stop
-    } catch {
-        # Audit-Logging fehlgeschlagen — Warnung ausgeben statt still scheitern
-        $script:AuditLogFailed = $true
-        $script:AuditLogError  = $_.Exception.Message
-    }
+        $line | Export-Csv -Path $logFile -Append -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+    } catch { }
 }
 
 function Show-ActiveMemberships {
@@ -897,10 +896,8 @@ $btnAdd         = $window.FindName('BtnAdd')
 $btnShowActive  = $window.FindName('BtnShowActive')
 
 # Zustand
-$script:SelectedUser   = $null
-$script:SelectedGroup  = $null
-$script:AuditLogFailed = $false
-$script:AuditLogError  = ''
+$script:SelectedUser  = $null
+$script:SelectedGroup = $null
 
 # --- Hilfsfunktionen fuer Status-TextBlock ---
 
@@ -1107,25 +1104,13 @@ $btnAdd.Add_Click({
             -GroupDN $script:SelectedGroup.DistinguishedName `
             -Hours   $hours
 
-        # Auf fehlgeschlagenes Audit-Logging pruefen
-        if ($script:AuditLogFailed) {
-            $script:AuditLogFailed = $false
-            [System.Windows.MessageBox]::Show(
-                $window,
-                "Mitgliedschaft wurde hinzugefuegt, aber der Audit-Log-Eintrag konnte nicht geschrieben werden.`n`nFehler: $script:AuditLogError`n`nAblauf: $expiry`n`nBitte EventLog-Berechtigungen pruefen (Quelle 'TempGroupManager' muss vorhanden sein).",
-                "Warnung: Audit-Logging fehlgeschlagen",
-                [System.Windows.MessageBoxButton]::OK,
-                [System.Windows.MessageBoxImage]::Warning
-            ) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show(
+        [System.Windows.MessageBox]::Show(
                 $window,
                 "Mitgliedschaft erfolgreich hinzugefuegt.`nAblauf: $expiry",
                 "Erfolg",
                 [System.Windows.MessageBoxButton]::OK,
                 [System.Windows.MessageBoxImage]::Information
             ) | Out-Null
-        }
 
         # Reset
         $txtUser.Text  = ''
