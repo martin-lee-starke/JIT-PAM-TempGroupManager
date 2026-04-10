@@ -419,7 +419,7 @@ $mainXaml = @'
 <Window
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="Temporaere Gruppenmitgliedschaft  [AD PAM / TTL]"
+    Title="EXA Temp Gruppenmitgliedschaft  [AD PAM GUI]"
     Width="680" MinWidth="550"
     Height="520" MinHeight="420"
     WindowStartupLocation="CenterScreen"
