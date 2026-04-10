@@ -517,13 +517,7 @@ $mainXaml = @'
     </Window.Resources>
 
     <DockPanel Background="{StaticResource AppBgBrush}">
-
-        <!-- === HEADER === -->
-        <Border DockPanel.Dock="Top" Background="{StaticResource AccentBrush}" Padding="16,12">
-            <TextBlock Text="Temporaere Gruppenmitgliedschaft  [AD PAM / TTL]"
-                       Foreground="White" FontSize="15" FontWeight="SemiBold"/>
-        </Border>
-
+    
         <!-- === INHALT (scrollbar fuer kleine Fenster) === -->
         <ScrollViewer VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
