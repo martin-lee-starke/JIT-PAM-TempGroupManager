@@ -1,0 +1,23 @@
+# Audit log (contains sensitive operator/user data)
+TempGroupManager_audit.csv
+
+# Code signing certificates
+*.pfx
+*.cer
+*.p12
+
+# PowerShell session/cache files
+*.pssc
+*.psd1.bak
+
+# Windows thumbnail cache
+Thumbs.db
+desktop.ini
+
+# macOS metadata
+.DS_Store
+
+# Editor files
+*.swp
+*~
+.vscode/
