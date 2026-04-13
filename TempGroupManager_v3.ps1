@@ -15,7 +15,7 @@
             -Target 'yourdomain.com'
 .NOTES
     Autor       : Martin Lee Starke
-    Version     : 1.0
+    Version     : 1.0.1
     Aktualisiert: 10.04.2024
 
     Audit-Log   : TempGroupManager_audit.csv (im Script-Verzeichnis)
