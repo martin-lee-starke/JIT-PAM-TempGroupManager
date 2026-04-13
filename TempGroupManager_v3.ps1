@@ -149,7 +149,7 @@ function Get-TempMemberships {
             } catch { }
         }
     }
-    return ,[TempMember[]]($results | Sort-Object _TTLSec)
+    return ,[TempMember[]]@($results | Sort-Object _TTLSec)
 }
 
 function Add-TempMembership {
