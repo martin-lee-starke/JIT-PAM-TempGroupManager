@@ -4,7 +4,7 @@
 .SYNOPSIS
     Temporaere AD-Gruppenmitgliedschaften via AD PAM (TTL-basiert) — WPF/XAML Edition
 .DESCRIPTION
-    3-Schritt-WPF-GUI: 1. Benutzer  2. Gruppe  3. Freigabe
+    3-Schritt-WPF-GUI: 1. Mitglied (Benutzer/Gruppe)  2. Gruppe  3. Freigabe
     Benoetigt: Windows Server 2016+ Domain Functional Level,
     AD PAM Feature aktiviert, RSAT-AD-PowerShell auf dem Admin-Rechner.
 
@@ -15,8 +15,8 @@
             -Target 'yourdomain.com'
 .NOTES
     Autor       : Martin Lee Starke
-    Version     : 1.0.1
-    Aktualisiert: 10.04.2024
+    Version     : 1.1.0
+    Aktualisiert: 23.09.2026
 
     Audit-Log   : TempGroupManager_audit.csv (im Script-Verzeichnis)
         1001 - Mitgliedschaft hinzugefuegt
@@ -51,12 +51,13 @@ try {
 # Echte CLR-Properties notwendig, damit WPF-DataGrid-Binding funktioniert.
 # PSCustomObject-NoteProperties sind fuer WPFs Reflection-basiertes Binding unsichtbar.
 class TempMember {
-    [string]$Benutzer
+    [string]$Mitglied
+    [string]$Typ
     [string]$Konto
     [string]$Gruppe
     [string]$Ablauf
     [string]$Verbleibend
-    [string]$_UserDN
+    [string]$_MemberDN
     [string]$_GroupDN
     [int]   $_TTLSec
 }
@@ -95,7 +96,7 @@ function Resolve-ADGroup {
     if ([string]::IsNullOrWhiteSpace($Identity)) { return $null }
     try {
         return Get-ADGroup -Identity $Identity `
-            -Properties Name, Description `
+            -Properties Name, Description, member `
             -ErrorAction Stop
     } catch {
         return $null
@@ -128,8 +129,13 @@ function Get-TempMemberships {
             $ttlSec   = [int]$Matches[1]
             $memberDN = $Matches[2]
             try {
-                $user     = Get-ADUser -Identity $memberDN -Properties DisplayName -ErrorAction Stop
-                $dispName = if ($user.DisplayName) { $user.DisplayName } else { $user.SamAccountName }
+                $obj      = Get-ADObject -Identity $memberDN -Properties displayName, sAMAccountName, objectClass -ErrorAction Stop
+                $dispName = if ($obj.displayName) { $obj.displayName } elseif ($obj.sAMAccountName) { $obj.sAMAccountName } else { $obj.Name }
+                $typ      = switch ($obj.objectClass) {
+                    'user'  { 'Benutzer' }
+                    'group' { 'Gruppe' }
+                    default { $obj.objectClass }
+                }
                 $expiry   = (Get-Date).AddSeconds($ttlSec)
                 $remaining = if ($ttlSec -ge 3600) {
                     '{0}h {1}min' -f [math]::Floor($ttlSec / 3600), [math]::Floor(($ttlSec % 3600) / 60)
@@ -137,12 +143,13 @@ function Get-TempMemberships {
                     '{0}min' -f [math]::Floor($ttlSec / 60)
                 }
                 $entry = [TempMember]::new()
-                $entry.Benutzer    = $dispName
-                $entry.Konto       = $user.SamAccountName
+                $entry.Mitglied    = $dispName
+                $entry.Typ         = $typ
+                $entry.Konto       = $obj.sAMAccountName
                 $entry.Gruppe      = $group.Name
                 $entry.Ablauf      = $expiry.ToString('dd.MM.yyyy HH:mm')
                 $entry.Verbleibend = $remaining
-                $entry._UserDN     = $memberDN
+                $entry._MemberDN   = $memberDN
                 $entry._GroupDN    = $group.DistinguishedName
                 $entry._TTLSec     = $ttlSec
                 $results.Add($entry)
@@ -153,12 +160,18 @@ function Get-TempMemberships {
 }
 
 function Add-TempMembership {
-    param([string]$UserDN, [string]$GroupDN, [int]$Hours)
-    Add-ADGroupMember -Identity $GroupDN -Members $UserDN `
+    param(
+        [string]$MemberDN,
+        [ValidateSet('Benutzer', 'Gruppe')]
+        [string]$MemberType,
+        [string]$GroupDN,
+        [int]$Hours
+    )
+    Add-ADGroupMember -Identity $GroupDN -Members $MemberDN `
         -MemberTimeToLive (New-TimeSpan -Hours $Hours)
     $operator = "$env:USERDOMAIN\$env:USERNAME auf $env:COMPUTERNAME"
     Write-AuditLog -EventId 1001 `
-        -Message "Temporaere Mitgliedschaft hinzugefuegt: $UserDN -> $GroupDN ($Hours Stunden) | Operator: $operator"
+        -Message "Temporaere Mitgliedschaft hinzugefuegt ($MemberType): $MemberDN -> $GroupDN ($Hours Stunden) | Operator: $operator"
 }
 
 function Write-AuditLog {
@@ -184,7 +197,7 @@ function Show-ActiveMemberships {
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Aktive temporaere Mitgliedschaften"
-    Width="780" MinWidth="520"
+    Width="860" MinWidth="560"
     Height="480" MinHeight="300"
     WindowStartupLocation="CenterOwner"
     ShowInTaskbar="False"
@@ -285,7 +298,8 @@ function Show-ActiveMemberships {
                   CanUserResizeRows="False"
                   CanUserAddRows="False">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Benutzer"    Binding="{Binding Benutzer}"    Width="*"/>
+                <DataGridTextColumn Header="Mitglied"    Binding="{Binding Mitglied}"    Width="*"/>
+                <DataGridTextColumn Header="Typ"         Binding="{Binding Typ}"         Width="80"/>
                 <DataGridTextColumn Header="Konto"       Binding="{Binding Konto}"       Width="130"/>
                 <DataGridTextColumn Header="Gruppe"      Binding="{Binding Gruppe}"      Width="*"/>
                 <DataGridTextColumn Header="Ablauf"      Binding="{Binding Ablauf}"      Width="120"/>
@@ -637,7 +651,7 @@ $mainXaml = @'
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="EXA Temp Gruppenmitgliedschaft  [AD PAM GUI]"
     Width="680" MinWidth="550"
-    Height="520" MinHeight="420"
+    Height="560" MinHeight="450"
     WindowStartupLocation="CenterScreen"
     FontFamily="Segoe UI" FontSize="13">
 
@@ -756,7 +770,7 @@ $mainXaml = @'
                     <RowDefinition Height="Auto" MinHeight="80"/>
                 </Grid.RowDefinitions>
 
-                <!-- === KARTE 1: BENUTZER === -->
+                <!-- === KARTE 1: MITGLIED (Benutzer oder Gruppe) === -->
                 <Border Grid.Row="0"
                         Background="{StaticResource CardBgBrush}"
                         BorderBrush="{StaticResource CardBorderBrush}"
@@ -770,7 +784,7 @@ $mainXaml = @'
                         <!-- Card-Header -->
                         <Border Grid.Row="0" Background="{StaticResource AccentBrush}"
                                 CornerRadius="4,4,0,0" Padding="12,7">
-                            <TextBlock Text="1.   BENUTZER"
+                            <TextBlock Text="1.   MITGLIED"
                                        Foreground="White" FontWeight="SemiBold"/>
                         </Border>
 
@@ -778,11 +792,22 @@ $mainXaml = @'
                         <Grid Grid.Row="1" Margin="12,10,12,12">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
 
+                            <!-- Typ-Auswahl -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                                <RadioButton x:Name="RbMemberUser"  Content="Benutzer"
+                                             GroupName="MemberType" IsChecked="True"
+                                             Margin="0,0,16,0" VerticalContentAlignment="Center"/>
+                                <RadioButton x:Name="RbMemberGroup" Content="Gruppe"
+                                             GroupName="MemberType"
+                                             VerticalContentAlignment="Center"/>
+                            </StackPanel>
+
                             <!-- Suchzeile -->
-                            <Grid Grid.Row="0">
+                            <Grid Grid.Row="1">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="8"/>
@@ -795,7 +820,7 @@ $mainXaml = @'
                             </Grid>
 
                             <!-- Status -->
-                            <TextBlock x:Name="TxtUserStatus" Grid.Row="1"
+                            <TextBlock x:Name="TxtUserStatus" Grid.Row="2"
                                        Text="&#x2014;"
                                        Foreground="{StaticResource MutedBrush}"
                                        Margin="0,8,0,0"
@@ -903,6 +928,8 @@ $reader = [System.Xml.XmlReader]::Create(
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 # Controls referenzieren
+$rbMemberUser   = $window.FindName('RbMemberUser')
+$rbMemberGroup  = $window.FindName('RbMemberGroup')
 $txtUser        = $window.FindName('TxtUser')
 $btnUserSearch  = $window.FindName('BtnUserSearch')
 $txtUserStatus  = $window.FindName('TxtUserStatus')
@@ -917,7 +944,8 @@ $btnAdd         = $window.FindName('BtnAdd')
 $btnShowActive  = $window.FindName('BtnShowActive')
 
 # Zustand
-$script:SelectedUser  = $null
+# SelectedMember: ADUser oder ADGroup, je nach gewaehltem Typ in Karte 1
+$script:SelectedMember = $null
 $script:SelectedGroup = $null
 
 # --- Hilfsfunktionen fuer Status-TextBlock ---
@@ -943,7 +971,7 @@ function Set-GroupStatus {
 }
 
 function Reset-UserSelection {
-    $script:SelectedUser = $null
+    $script:SelectedMember = $null
     Set-UserStatus -Text ([string][char]0x2014)
 }
 
@@ -952,25 +980,63 @@ function Reset-GroupSelection {
     Set-GroupStatus -Text ([string][char]0x2014)
 }
 
-# --- Benutzer direkt aufloesen (Enter in TextBox) ---
+# --- Mitglied: Typ-Umschaltung und Anzeige ---
+
+function Get-MemberType {
+    if ($rbMemberGroup.IsChecked) { return 'Gruppe' }
+    return 'Benutzer'
+}
+
+function Set-MemberSelection {
+    # Uebernimmt ein aufgeloestes Mitglied (ADUser oder ADGroup) und zeigt es an
+    param($Member)
+    $script:SelectedMember = $Member
+    if ((Get-MemberType) -eq 'Gruppe') {
+        $count = @($Member.member).Count
+        Set-UserStatus -Text ([string][char]0x2714 + "  Gruppe: $($Member.Name)  ($count direkte Mitglieder)") -Color Success
+    } else {
+        $disp = if ($Member.DisplayName) { $Member.DisplayName } else { $Member.SamAccountName }
+        $dept = if ($Member.Department)  { "  |  $($Member.Department)" } else { '' }
+        Set-UserStatus -Text ([string][char]0x2714 + "  $disp  ($($Member.SamAccountName))$dept") -Color Success
+    }
+}
+
+$onMemberTypeChanged = {
+    $txtUser.Text = ''
+    Reset-UserSelection
+}
+$rbMemberUser.Add_Checked($onMemberTypeChanged)
+$rbMemberGroup.Add_Checked($onMemberTypeChanged)
+
+# --- Mitglied direkt aufloesen (Enter in TextBox) ---
 
 $resolveUser = {
     $text = $txtUser.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($text)) { Reset-UserSelection; return }
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {
-        $u = Resolve-ADUser -Identity $text
-        if ($null -eq $u) {
-            $script:SelectedUser = $null
-            Set-UserStatus -Text ([string][char]0x2718 + "  Benutzer nicht gefunden") -Color Error
-        } elseif (-not $u.Enabled) {
-            $script:SelectedUser = $null
-            Set-UserStatus -Text ([string][char]0x2718 + "  Konto ist deaktiviert") -Color Error
+        if ((Get-MemberType) -eq 'Gruppe') {
+            $g = Resolve-ADGroup -Identity $text
+            if ($null -eq $g) {
+                $script:SelectedMember = $null
+                Set-UserStatus -Text ([string][char]0x2718 + "  Gruppe nicht gefunden") -Color Error
+            } elseif ($g.GroupScope -ne 'Global') {
+                $script:SelectedMember = $null
+                Set-UserStatus -Text ([string][char]0x2718 + "  Nur globale Gruppen koennen Mitglied werden") -Color Error
+            } else {
+                Set-MemberSelection -Member $g
+            }
         } else {
-            $script:SelectedUser = $u
-            $disp = if ($u.DisplayName) { $u.DisplayName } else { $u.SamAccountName }
-            $dept = if ($u.Department)  { "  |  $($u.Department)" } else { '' }
-            Set-UserStatus -Text ([string][char]0x2714 + "  $disp  ($($u.SamAccountName))$dept") -Color Success
+            $u = Resolve-ADUser -Identity $text
+            if ($null -eq $u) {
+                $script:SelectedMember = $null
+                Set-UserStatus -Text ([string][char]0x2718 + "  Benutzer nicht gefunden") -Color Error
+            } elseif (-not $u.Enabled) {
+                $script:SelectedMember = $null
+                Set-UserStatus -Text ([string][char]0x2718 + "  Konto ist deaktiviert") -Color Error
+            } else {
+                Set-MemberSelection -Member $u
+            }
         }
     } finally {
         $window.Cursor = $null
@@ -985,16 +1051,25 @@ $txtUser.Add_TextChanged({
     if ([string]::IsNullOrWhiteSpace($txtUser.Text)) { Reset-UserSelection }
 })
 
-# --- Benutzer Such-Dialog ---
+# --- Mitglied Such-Dialog ---
 
 $btnUserSearch.Add_Click({
-    $result = Show-SearchDialog -Type User -Owner $window
-    if ($null -ne $result) {
-        $script:SelectedUser = $result
-        $txtUser.Text = $result.SamAccountName
-        $disp = if ($result.DisplayName) { $result.DisplayName } else { $result.SamAccountName }
-        $dept = if ($result.Department)  { "  |  $($result.Department)" } else { '' }
-        Set-UserStatus -Text ([string][char]0x2714 + "  $disp  ($($result.SamAccountName))$dept") -Color Success
+    if ((Get-MemberType) -eq 'Gruppe') {
+        $result = Show-SearchDialog -Type Group -Owner $window
+        if ($null -ne $result) {
+            # Suchergebnis enthaelt kein member-Attribut -> fuer die Mitgliederzahl nachladen
+            $result = Resolve-ADGroup -Identity $result.DistinguishedName
+            if ($null -ne $result) {
+                $txtUser.Text = $result.Name
+                Set-MemberSelection -Member $result
+            }
+        }
+    } else {
+        $result = Show-SearchDialog -Type User -Owner $window
+        if ($null -ne $result) {
+            $txtUser.Text = $result.SamAccountName
+            Set-MemberSelection -Member $result
+        }
     }
 })
 
@@ -1053,10 +1128,10 @@ $txtDauer.Add_PreviewTextInput({
 # --- Mitgliedschaft hinzufuegen ---
 
 $btnAdd.Add_Click({
-    if ($null -eq $script:SelectedUser) {
+    if ($null -eq $script:SelectedMember) {
         [System.Windows.MessageBox]::Show(
             $window,
-            "Bitte zuerst einen Benutzer auswaehlen (Schritt 1).",
+            "Bitte zuerst ein Mitglied (Benutzer oder Gruppe) auswaehlen (Schritt 1).",
             "Eingabe fehlt",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Warning
@@ -1068,6 +1143,20 @@ $btnAdd.Add_Click({
             $window,
             "Bitte zuerst eine Gruppe auswaehlen (Schritt 2).",
             "Eingabe fehlt",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Warning
+        ) | Out-Null
+        return
+    }
+
+    $memberType = Get-MemberType
+
+    if ($memberType -eq 'Gruppe' -and
+        $script:SelectedMember.DistinguishedName -eq $script:SelectedGroup.DistinguishedName) {
+        [System.Windows.MessageBox]::Show(
+            $window,
+            "Eine Gruppe kann nicht Mitglied von sich selbst werden.",
+            "Ungueltige Auswahl",
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Warning
         ) | Out-Null
@@ -1102,28 +1191,43 @@ $btnAdd.Add_Click({
     }
 
     $expiry = (Get-Date).AddHours($hours).ToString('dd.MM.yyyy HH:mm')
-    $uName  = if ($script:SelectedUser.DisplayName) {
-        $script:SelectedUser.DisplayName
-    } else {
-        $script:SelectedUser.SamAccountName
-    }
     $unitTxt = if ($cmbUnit.SelectedIndex -eq 1) { 'Tag(e)' } else { 'Stunde(n)' }
+
+    if ($memberType -eq 'Gruppe') {
+        $memberCount = @($script:SelectedMember.member).Count
+        $confirmText = "Mitglied  : $($script:SelectedMember.Name)`n" +
+                       "Typ       : Gruppe (aktuell $memberCount direkte Mitglieder)`n" +
+                       "Zielgruppe: $($script:SelectedGroup.Name)`n" +
+                       "Dauer     : $dauerVal $unitTxt`nAblauf    : $expiry`n`n" +
+                       "Achtung: Alle aktuellen und kuenftigen Mitglieder dieser Gruppe " +
+                       "erhalten den Zugriff.`n`nMitgliedschaft hinzufuegen?"
+        $confirmIcon = [System.Windows.MessageBoxImage]::Warning
+    } else {
+        $uName = if ($script:SelectedMember.DisplayName) {
+            $script:SelectedMember.DisplayName
+        } else {
+            $script:SelectedMember.SamAccountName
+        }
+        $confirmText = "Benutzer : $uName`nGruppe   : $($script:SelectedGroup.Name)`nDauer    : $dauerVal $unitTxt`nAblauf   : $expiry`n`nMitgliedschaft hinzufuegen?"
+        $confirmIcon = [System.Windows.MessageBoxImage]::Question
+    }
 
     $confirm = [System.Windows.MessageBox]::Show(
         $window,
-        "Benutzer : $uName`nGruppe   : $($script:SelectedGroup.Name)`nDauer    : $dauerVal $unitTxt`nAblauf   : $expiry`n`nMitgliedschaft hinzufuegen?",
+        $confirmText,
         "Bestaetigung",
         [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
+        $confirmIcon
     )
     if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     $window.Cursor = [System.Windows.Input.Cursors]::Wait
     try {
         Add-TempMembership `
-            -UserDN  $script:SelectedUser.DistinguishedName `
-            -GroupDN $script:SelectedGroup.DistinguishedName `
-            -Hours   $hours
+            -MemberDN   $script:SelectedMember.DistinguishedName `
+            -MemberType $memberType `
+            -GroupDN    $script:SelectedGroup.DistinguishedName `
+            -Hours      $hours
 
         [System.Windows.MessageBox]::Show(
                 $window,
